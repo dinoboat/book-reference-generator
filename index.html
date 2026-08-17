@@ -170,10 +170,11 @@
   <p class="subtitle">Give it a title, it searches Google Books, Open Library, and Crossref, cross-checks them, and generates an APA reference plus an RIS bibliography entry.</p>
 
   <div class="panel">
-    <label for="title">Book title *</label>
-    <input type="text" id="title" placeholder="e.g. Software Studies: A Lexicon">
+    <label for="title">Book title, ISBN, or Amazon book link *</label>
+    <input type="text" id="title" placeholder="e.g. Software Studies: A Lexicon, or an ISBN, or an amazon.com/dp/... link">
+    <p class="hint">Amazon links: the ISBN is read out of the URL itself, no request is ever sent to Amazon. Goodreads links aren't supported (no public API) &mdash; copy the ISBN from the page and paste that instead.</p>
 
-    <label for="author">Author (optional, helps disambiguate)</label>
+    <label for="author">Author (optional, helps disambiguate a title search)</label>
     <input type="text" id="author" placeholder="e.g. Matthew Fuller">
 
     <details>
@@ -295,21 +296,34 @@ async function fetchJson(url, log) {
   }
 }
 
-async function fetchGoogleBooks(title, author, apiKey, log) {
-  let q = `intitle:${title}`;
-  if (author) q += ` inauthor:${author}`;
-  const params = new URLSearchParams({ q, maxResults: 5 });
-  if (apiKey) params.set('key', apiKey);
-  const data = await fetchJson(`https://www.googleapis.com/books/v1/volumes?${params}`, log);
-  if (!data || !data.items || !data.items.length) return null;
+// --- Identifier parsing: pulls an ISBN out of a pasted Amazon URL or bare
+// ISBN string WITHOUT ever fetching the third-party page itself. ---
+function parseIdentifier(raw) {
+  const trimmed = raw.trim();
 
-  const items = data.items;
-  const best = items.find((it) => it.volumeInfo && it.volumeInfo.publisher && it.volumeInfo.publishedDate) || items[0];
-  const info = best.volumeInfo || {};
+  const isbnClean = trimmed.replace(/[-\s]/g, '');
+  if (/^(?:\d{9}[\dXx]|\d{13})$/.test(isbnClean)) {
+    return { type: 'isbn', value: isbnClean.toUpperCase() };
+  }
 
-  let isbn = null;
+  if (/amazon\./i.test(trimmed)) {
+    const m = trimmed.match(/\/(?:dp|gp\/product|gp\/aw\/d)\/([A-Za-z0-9]{10})/i);
+    if (m && /^\d{9}[\dXx]$/.test(m[1])) {
+      return { type: 'isbn', value: m[1].toUpperCase(), via: 'Amazon link (ASIN)' };
+    }
+    return { type: 'amazon-no-isbn' };
+  }
+
+  if (/goodreads\.com/i.test(trimmed)) {
+    return { type: 'goodreads-unsupported' };
+  }
+
+  return { type: 'title', value: trimmed };
+}
+
+function extractGoogleBooksInfo(info, fallbackTitle) {
   const idents = info.industryIdentifiers || [];
-  isbn = (idents.find((i) => i.type === 'ISBN_13') || idents.find((i) => i.type === 'ISBN_10') || {}).identifier || null;
+  const isbn = (idents.find((i) => i.type === 'ISBN_13') || idents.find((i) => i.type === 'ISBN_10') || {}).identifier || null;
 
   let year = null;
   if (info.publishedDate) {
@@ -319,7 +333,7 @@ async function fetchGoogleBooks(title, author, apiKey, log) {
 
   return {
     source: 'Google Books',
-    title: info.title || title,
+    title: info.title || fallbackTitle,
     authors_raw: info.authors || [],
     role: 'author',
     year,
@@ -327,6 +341,26 @@ async function fetchGoogleBooks(title, author, apiKey, log) {
     isbn,
     url: info.infoLink || info.canonicalVolumeLink || null,
   };
+}
+
+async function fetchGoogleBooksByQuery(q, apiKey, fallbackTitle, log) {
+  const params = new URLSearchParams({ q, maxResults: 5 });
+  if (apiKey) params.set('key', apiKey);
+  const data = await fetchJson(`https://www.googleapis.com/books/v1/volumes?${params}`, log);
+  if (!data || !data.items || !data.items.length) return null;
+  const items = data.items;
+  const best = items.find((it) => it.volumeInfo && it.volumeInfo.publisher && it.volumeInfo.publishedDate) || items[0];
+  return extractGoogleBooksInfo(best.volumeInfo || {}, fallbackTitle);
+}
+
+function fetchGoogleBooks(title, author, apiKey, log) {
+  let q = `intitle:${title}`;
+  if (author) q += ` inauthor:${author}`;
+  return fetchGoogleBooksByQuery(q, apiKey, title, log);
+}
+
+function fetchGoogleBooksByISBN(isbn, apiKey, log) {
+  return fetchGoogleBooksByQuery(`isbn:${isbn}`, apiKey, isbn, log);
 }
 
 async function fetchOpenLibrary(title, author, log) {
@@ -348,18 +382,31 @@ async function fetchOpenLibrary(title, author, log) {
   };
 }
 
-async function fetchCrossref(title, author, log) {
-  const q = author ? `${title} ${author}` : title;
-  const params = new URLSearchParams({ 'query.bibliographic': q, rows: 5 });
-  const data = await fetchJson(`https://api.crossref.org/works?${params}`, log);
-  if (!data) return null;
+async function fetchOpenLibraryByISBN(isbn, log) {
+  const params = new URLSearchParams({ bibkeys: `ISBN:${isbn}`, format: 'json', jscmd: 'data' });
+  const data = await fetchJson(`https://openlibrary.org/api/books?${params}`, log);
+  const doc = data && data[`ISBN:${isbn}`];
+  if (!doc) return null;
 
-  const items = (data.message && data.message.items) || [];
-  const bookTypes = new Set(['book', 'monograph', 'edited-book', 'reference-book']);
-  const candidates = items.filter((it) => bookTypes.has(it.type) && !(it['container-title'] && it['container-title'].length));
-  if (!candidates.length) return null;
-  const item = candidates[0];
+  let year = null;
+  if (doc.publish_date) {
+    const m = /\d{4}/.exec(doc.publish_date);
+    if (m) year = parseInt(m[0], 10);
+  }
 
+  return {
+    source: 'Open Library',
+    title: doc.title || isbn,
+    authors_raw: (doc.authors || []).map((a) => a.name).filter(Boolean),
+    role: 'author',
+    year,
+    publisher: (doc.publishers && doc.publishers[0] && doc.publishers[0].name) || null,
+    isbn,
+    url: doc.url || null,
+  };
+}
+
+function extractCrossrefItem(item, fallbackTitle) {
   let role = 'editor';
   let contributors = item.editor;
   if (!contributors || !contributors.length) {
@@ -378,7 +425,7 @@ async function fetchCrossref(title, author, log) {
 
   return {
     source: 'Crossref',
-    title: (item.title && item.title[0]) || title,
+    title: (item.title && item.title[0]) || fallbackTitle,
     authors_raw,
     role,
     year,
@@ -386,6 +433,45 @@ async function fetchCrossref(title, author, log) {
     isbn: (item.ISBN || [])[0] || null,
     url: item.URL || null,
   };
+}
+
+async function fetchCrossref(title, author, log) {
+  const q = author ? `${title} ${author}` : title;
+  const params = new URLSearchParams({ 'query.bibliographic': q, rows: 5 });
+  const data = await fetchJson(`https://api.crossref.org/works?${params}`, log);
+  if (!data) return null;
+
+  const items = (data.message && data.message.items) || [];
+  const bookTypes = new Set(['book', 'monograph', 'edited-book', 'reference-book']);
+  const candidates = items.filter((it) => bookTypes.has(it.type) && !(it['container-title'] && it['container-title'].length));
+  if (!candidates.length) return null;
+  return extractCrossrefItem(candidates[0], title);
+}
+
+async function fetchCrossrefByISBN(isbn, log) {
+  const params = new URLSearchParams({ filter: `isbn:${isbn}`, rows: 20 });
+  const data = await fetchJson(`https://api.crossref.org/works?${params}`, log);
+  if (!data) return null;
+  const items = (data.message && data.message.items) || [];
+  // The ISBN filter also matches individual chapters within the book that
+  // carry the same parent ISBN in Crossref's metadata; only accept a
+  // whole-book entry, never a chapter (which would attribute the wrong
+  // author to the entire book).
+  const bookTypes = new Set(['book', 'monograph', 'edited-book', 'reference-book']);
+  const candidates = items.filter((it) => bookTypes.has(it.type) && !(it['container-title'] && it['container-title'].length));
+  if (!candidates.length) return null;
+  return extractCrossrefItem(candidates[0], isbn);
+}
+
+function normalizeTitle(t) {
+  return (t || '').toLowerCase().replace(/[^\w\s]/g, '').trim();
+}
+
+function titlesLikelyMatch(a, b) {
+  const na = normalizeTitle(a);
+  const nb = normalizeTitle(b);
+  if (!na || !nb) return true; // nothing to compare against, don't false-alarm
+  return na === nb || na.includes(nb) || nb.includes(na);
 }
 
 function mergeSources(primary, secondaries, log) {
@@ -403,6 +489,9 @@ function mergeSources(primary, secondaries, log) {
   for (const sec of secondaries) {
     sourcesUsed.push(sec.source);
 
+    if (!titlesLikelyMatch(base.title, sec.title)) {
+      warnings.push(`Title mismatch: ${base.source} found "${base.title}", ${sec.source} found "${sec.title}" for the same lookup — these may be different works (e.g. a chapter vs. the whole book). Double-check the result below.`);
+    }
     if (base.year && sec.year && base.year !== sec.year) {
       warnings.push(`Year mismatch: ${base.source} says ${base.year}, ${sec.source} says ${sec.year}. Using ${base.year}.`);
     }
@@ -441,8 +530,8 @@ function download(filename, text) {
 }
 
 $('go').addEventListener('click', async () => {
-  const title = $('title').value.trim();
-  if (!title) { $('title').focus(); return; }
+  const rawInput = $('title').value.trim();
+  if (!rawInput) { $('title').focus(); return; }
   const author = $('author').value.trim();
   const yearOverride = $('year').value.trim();
   const publisherOverride = $('publisher').value.trim();
@@ -462,26 +551,63 @@ $('go').addEventListener('click', async () => {
   btn.textContent = 'Searching...';
 
   const append = (line) => { log.textContent += line + '\n'; log.scrollTop = log.scrollHeight; };
+  const showWarn = (html) => { warnbox.style.display = 'block'; warnbox.innerHTML = html; };
+
+  const identifier = parseIdentifier(rawInput);
+
+  if (identifier.type === 'amazon-no-isbn') {
+    btn.disabled = false;
+    btn.textContent = 'Look up & generate';
+    log.style.display = 'none';
+    showWarn('&#9888; This Amazon link doesn\'t contain a recognizable ISBN (common for Kindle-only editions or non-standard ASINs). Please paste the ISBN or the plain book title instead.');
+    return;
+  }
+  if (identifier.type === 'goodreads-unsupported') {
+    btn.disabled = false;
+    btn.textContent = 'Look up & generate';
+    log.style.display = 'none';
+    showWarn('&#9888; Goodreads links can\'t be read automatically &mdash; Goodreads has no public API, and scraping its pages would violate Amazon\'s Terms of Service (Goodreads is Amazon-owned). Copy the ISBN shown on that Goodreads page and paste it here instead, or just type the title.');
+    return;
+  }
+
+  const usingIsbn = identifier.type === 'isbn';
+  const title = identifier.value;
 
   try {
-    append(`Searching Google Books for "${title}"${author ? ' by ' + author : ''}...`);
-    const gb = await fetchGoogleBooks(title, author, apiKey, append);
-    append(gb ? `  Google Books: found "${gb.title}" (${gb.year || '?'}, ${gb.publisher || '?'})` : '  Google Books: no usable match');
+    let gb, ol, cf;
+    if (usingIsbn) {
+      const isbn = identifier.value;
+      append(identifier.via ? `Extracted ISBN ${isbn} from ${identifier.via}...` : `Searching by ISBN ${isbn}...`);
+      gb = await fetchGoogleBooksByISBN(isbn, apiKey, append);
+      append(gb ? `  Google Books: found "${gb.title}" (${gb.year || '?'}, ${gb.publisher || '?'})` : '  Google Books: no usable match');
 
-    append('Cross-checking Open Library...');
-    const ol = await fetchOpenLibrary(title, author, append);
-    append(ol ? `  Open Library: found "${ol.title}" (${ol.year || '?'}, ${ol.publisher || '?'})` : '  Open Library: no usable match');
+      append('Cross-checking Open Library...');
+      ol = await fetchOpenLibraryByISBN(isbn, append);
+      append(ol ? `  Open Library: found "${ol.title}" (${ol.year || '?'}, ${ol.publisher || '?'})` : '  Open Library: no usable match');
 
-    append('Cross-checking Crossref...');
-    const cf = await fetchCrossref(title, author, append);
-    append(cf ? `  Crossref: found "${cf.title}" (${cf.role}: ${cf.authors_raw.join(', ') || '?'}, ${cf.year || '?'})` : '  Crossref: no usable match');
+      append('Cross-checking Crossref...');
+      cf = await fetchCrossrefByISBN(isbn, append);
+      append(cf ? `  Crossref: found "${cf.title}" (${cf.role}: ${cf.authors_raw.join(', ') || '?'}, ${cf.year || '?'})` : '  Crossref: no usable match');
+    } else {
+      append(`Searching Google Books for "${title}"${author ? ' by ' + author : ''}...`);
+      gb = await fetchGoogleBooks(title, author, apiKey, append);
+      append(gb ? `  Google Books: found "${gb.title}" (${gb.year || '?'}, ${gb.publisher || '?'})` : '  Google Books: no usable match');
+
+      append('Cross-checking Open Library...');
+      ol = await fetchOpenLibrary(title, author, append);
+      append(ol ? `  Open Library: found "${ol.title}" (${ol.year || '?'}, ${ol.publisher || '?'})` : '  Open Library: no usable match');
+
+      append('Cross-checking Crossref...');
+      cf = await fetchCrossref(title, author, append);
+      append(cf ? `  Crossref: found "${cf.title}" (${cf.role}: ${cf.authors_raw.join(', ') || '?'}, ${cf.year || '?'})` : '  Crossref: no usable match');
+    }
 
     const [merged, warnings] = mergeSources(gb, [ol, cf], append);
 
-    const finalTitle = merged.title || title;
+    const finalTitle = merged.title || (usingIsbn ? `ISBN ${identifier.value}` : title);
     const finalYear = yearOverride || merged.year || '';
     const finalPublisher = publisherOverride || merged.publisher || '';
-    const finalIsbn = isbnOverride || merged.isbn || '';
+    const finalIsbn = isbnOverride || merged.isbn || (usingIsbn ? identifier.value : '');
     const finalUrl = merged.url || '';
     const finalRole = merged.role || 'author';
 
