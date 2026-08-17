@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Book Reference Generator</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f7f7f8;
+    --panel: #ffffff;
+    --text: #1a1a1a;
+    --muted: #6b6b6b;
+    --border: #dcdcdc;
+    --accent: #2f6feb;
+    --accent-text: #ffffff;
+    --warn-bg: #fff6e5;
+    --warn-border: #e8c37a;
+    --mono-bg: #f0f0f2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16171a;
+      --panel: #1f2023;
+      --text: #eaeaea;
+      --muted: #9a9a9a;
+      --border: #3a3b3f;
+      --accent: #5b8def;
+      --accent-text: #0a0a0a;
+      --warn-bg: #2a2410;
+      --warn-border: #6b5a1e;
+      --mono-bg: #0e0f11;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    justify-content: center;
+    padding: 32px 16px;
+  }
+  main {
+    width: 100%;
+    max-width: 640px;
+  }
+  h1 {
+    font-size: 1.4rem;
+    margin-bottom: 4px;
+  }
+  p.subtitle {
+    color: var(--muted);
+    margin-top: 0;
+    margin-bottom: 24px;
+    font-size: 0.9rem;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  label {
+    display: block;
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin-bottom: 4px;
+    margin-top: 14px;
+  }
+  label:first-child { margin-top: 0; }
+  input[type="text"] {
+    width: 100%;
+    padding: 9px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 0.95rem;
+  }
+  .row2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .hint {
+    font-size: 0.78rem;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+  details summary {
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin-top: 14px;
+    color: var(--muted);
+  }
+  button {
+    margin-top: 18px;
+    width: 100%;
+    padding: 11px;
+    border: none;
+    border-radius: 6px;
+    background: var(--accent);
+    color: var(--accent-text);
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.6; cursor: default; }
+  #log {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.78rem;
+    background: var(--mono-bg);
+    border-radius: 6px;
+    padding: 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 220px;
+    overflow-y: auto;
+    display: none;
+  }
+  .warn {
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-size: 0.82rem;
+    margin-top: 10px;
+    display: none;
+  }
+  .result { display: none; }
+  .result h2 {
+    font-size: 0.95rem;
+    margin: 18px 0 6px;
+  }
+  pre.output {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.82rem;
+    background: var(--mono-bg);
+    border-radius: 6px;
+    padding: 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin: 0 0 8px;
+  }
+  .dl-btn {
+    display: inline-block;
+    margin-top: 0;
+    width: auto;
+    padding: 6px 14px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    background: var(--border);
+    color: var(--text);
+  }
+  footer {
+    text-align: center;
+    font-size: 0.75rem;
+    color: var(--muted);
+    margin-top: 20px;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Book Reference Generator</h1>
+  <p class="subtitle">Give it a title, it searches Google Books, Open Library, and Crossref, cross-checks them, and generates an APA reference plus an RIS bibliography entry.</p>
+
+  <div class="panel">
+    <label for="title">Book title *</label>
+    <input type="text" id="title" placeholder="e.g. Software Studies: A Lexicon">
+
+    <label for="author">Author (optional, helps disambiguate)</label>
+    <input type="text" id="author" placeholder="e.g. Matthew Fuller">
+
+    <details>
+      <summary>Manual overrides &amp; options</summary>
+      <div class="row2">
+        <div>
+          <label for="year">Year override</label>
+          <input type="text" id="year" placeholder="e.g. 2008">
+        </div>
+        <div>
+          <label for="isbn">ISBN override</label>
+          <input type="text" id="isbn" placeholder="e.g. 9780262062749">
+        </div>
+      </div>
+      <label for="publisher">Publisher override</label>
+      <input type="text" id="publisher" placeholder="e.g. MIT Press">
+
+      <label for="apikey">Google Books API key (optional)</label>
+      <input type="text" id="apikey" placeholder="avoids shared rate limits, saved in this browser only">
+      <p class="hint">Free key: console.cloud.google.com &rarr; enable "Books API" &rarr; Credentials &rarr; Create API key. Stored only in your browser's local storage, never sent anywhere but Google.</p>
+    </details>
+
+    <button id="go">Look up &amp; generate</button>
+    <div id="log"></div>
+    <div id="warnbox" class="warn"></div>
+  </div>
+
+  <div class="panel result" id="resultPanel">
+    <h2>APA reference (<span id="apaFilename"></span>)</h2>
+    <pre class="output" id="apaOut"></pre>
+    <button class="dl-btn" id="dlApa">Download .txt</button>
+
+    <h2>RIS entry (<span id="risFilename"></span>)</h2>
+    <pre class="output" id="risOut"></pre>
+    <button class="dl-btn" id="dlRis">Download .ris</button>
+  </div>
+
+  <footer>Runs entirely in your browser. No data is sent anywhere except Google Books, Open Library, and Crossref's public APIs.</footer>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+function slugify(text) {
+  return text.replace(/[^\w\s-]/g, '').trim().toLowerCase().replace(/[\s_-]+/g, '-') || 'reference';
+}
+
+function parseAuthors(authorString) {
+  const parts = authorString.split(/\s*(?:,|&|\band\b)\s*/i).filter(Boolean);
+  const authors = parts.map((part) => {
+    const words = part.trim().split(/\s+/);
+    if (words.length === 1) return { first: '', last: words[0] };
+    return { first: words.slice(0, -1).join(' '), last: words[words.length - 1] };
+  });
+  return authors.length ? authors : [{ first: '', last: authorString.trim() }];
+}
+
+function initials(first) {
+  if (!first) return '';
+  return first.split(/\s+/).map((w) => w[0].toUpperCase() + '.').join(' ');
+}
+
+function formatName(a) {
+  let s = `${a.last}, ${a.first}`.trim();
+  if (s.endsWith(',')) s = s.slice(0, -1);
+  return s;
+}
+
+function formatAPA(title, authors, year, publisher, role) {
+  const authorParts = authors.map((a) => {
+    let s = `${a.last}, ${initials(a.first)}`.trim();
+    if (s.endsWith(',')) s = s.slice(0, -1);
+    return s;
+  });
+  let authorStr;
+  if (authorParts.length === 1) authorStr = authorParts[0];
+  else if (authorParts.length === 2) authorStr = `${authorParts[0]}, & ${authorParts[1]}`;
+  else if (authorParts.length > 1) authorStr = authorParts.slice(0, -1).join(', ') + `, & ${authorParts[authorParts.length - 1]}`;
+  else authorStr = '[Author unknown]';
+
+  if (authorParts.length && role === 'editor') {
+    authorStr += authorParts.length === 1 ? ' (Ed.).' : ' (Eds.).';
+  }
+
+  const yearStr = year || 'n.d.';
+  const publisherStr = publisher || '[Publisher unknown]';
+  return `${authorStr} (${yearStr}). ${title}. ${publisherStr}.`;
+}
+
+function formatRIS(title, authors, year, publisher, isbn, url, role) {
+  const lines = ['TY  - BOOK'];
+  const tag = role === 'editor' ? 'ED' : 'AU';
+  authors.forEach((a) => lines.push(`${tag}  - ${formatName(a)}`));
+  lines.push(`TI  - ${title}`);
+  if (year) lines.push(`PY  - ${year}`);
+  if (publisher) lines.push(`PB  - ${publisher}`);
+  if (isbn) lines.push(`SN  - ${isbn}`);
+  if (url) lines.push(`UR  - ${url}`);
+  lines.push('ER  - ');
+  return lines.join('\n');
+}
+
+function normalizePublisher(name) {
+  if (!name) return '';
+  return name.replace(/[^\w]/g, '').toLowerCase();
+}
+
+async function fetchJson(url, log) {
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      log(`  [warning] ${url.split('?')[0]} responded ${resp.status} ${resp.statusText}`);
+      return null;
+    }
+    return await resp.json();
+  } catch (e) {
+    log(`  [warning] request to ${url.split('?')[0]} failed: ${e.message}`);
+    return null;
+  }
+}
+
+async function fetchGoogleBooks(title, author, apiKey, log) {
+  let q = `intitle:${title}`;
+  if (author) q += ` inauthor:${author}`;
+  const params = new URLSearchParams({ q, maxResults: 5 });
+  if (apiKey) params.set('key', apiKey);
+  const data = await fetchJson(`https://www.googleapis.com/books/v1/volumes?${params}`, log);
+  if (!data || !data.items || !data.items.length) return null;
+
+  const items = data.items;
+  const best = items.find((it) => it.volumeInfo && it.volumeInfo.publisher && it.volumeInfo.publishedDate) || items[0];
+  const info = best.volumeInfo || {};
+
+  let isbn = null;
+  const idents = info.industryIdentifiers || [];
+  isbn = (idents.find((i) => i.type === 'ISBN_13') || idents.find((i) => i.type === 'ISBN_10') || {}).identifier || null;
+
+  let year = null;
+  if (info.publishedDate) {
+    const m = /^(\d{4})/.exec(info.publishedDate);
+    if (m) year = parseInt(m[1], 10);
+  }
+
+  return {
+    source: 'Google Books',
+    title: info.title || title,
+    authors_raw: info.authors || [],
+    role: 'author',
+    year,
+    publisher: info.publisher || null,
+    isbn,
+    url: info.infoLink || info.canonicalVolumeLink || null,
+  };
+}
+
+async function fetchOpenLibrary(title, author, log) {
+  const params = new URLSearchParams({ title, limit: 1 });
+  if (author) params.set('author', author);
+  const data = await fetchJson(`https://openlibrary.org/search.json?${params}`, log);
+  if (!data || !data.docs || !data.docs.length) return null;
+
+  const doc = data.docs[0];
+  return {
+    source: 'Open Library',
+    title: doc.title || title,
+    authors_raw: doc.author_name || [],
+    role: 'author',
+    year: doc.first_publish_year || null,
+    publisher: (doc.publisher || [])[0] || null,
+    isbn: (doc.isbn || [])[0] || null,
+    url: doc.key ? `https://openlibrary.org${doc.key}` : null,
+  };
+}
+
+async function fetchCrossref(title, author, log) {
+  const q = author ? `${title} ${author}` : title;
+  const params = new URLSearchParams({ 'query.bibliographic': q, rows: 5 });
+  const data = await fetchJson(`https://api.crossref.org/works?${params}`, log);
+  if (!data) return null;
+
+  const items = (data.message && data.message.items) || [];
+  const bookTypes = new Set(['book', 'monograph', 'edited-book', 'reference-book']);
+  const candidates = items.filter((it) => bookTypes.has(it.type) && !(it['container-title'] && it['container-title'].length));
+  if (!candidates.length) return null;
+  const item = candidates[0];
+
+  let role = 'editor';
+  let contributors = item.editor;
+  if (!contributors || !contributors.length) {
+    role = 'author';
+    contributors = item.author;
+  }
+  const authors_raw = (contributors || [])
+    .map((p) => `${p.given || ''} ${p.family || ''}`.trim())
+    .filter(Boolean);
+
+  let year = null;
+  for (const field of ['published-print', 'published', 'published-online', 'issued']) {
+    const parts = item[field] && item[field]['date-parts'];
+    if (parts && parts[0] && parts[0][0]) { year = parts[0][0]; break; }
+  }
+
+  return {
+    source: 'Crossref',
+    title: (item.title && item.title[0]) || title,
+    authors_raw,
+    role,
+    year,
+    publisher: item.publisher || null,
+    isbn: (item.ISBN || [])[0] || null,
+    url: item.URL || null,
+  };
+}
+
+function mergeSources(primary, secondaries, log) {
+  secondaries = secondaries.filter(Boolean);
+  const warnings = [];
+
+  if (!primary && !secondaries.length) {
+    return [{}, ['No results found on Google Books, Open Library, or Crossref. Use the manual overrides above.']];
+  }
+  if (!primary) primary = secondaries.shift();
+
+  const base = { ...primary };
+  const sourcesUsed = [base.source];
+
+  for (const sec of secondaries) {
+    sourcesUsed.push(sec.source);
+
+    if (base.year && sec.year && base.year !== sec.year) {
+      warnings.push(`Year mismatch: ${base.source} says ${base.year}, ${sec.source} says ${sec.year}. Using ${base.year}.`);
+    }
+    if (base.publisher && sec.publisher && normalizePublisher(base.publisher) !== normalizePublisher(sec.publisher)) {
+      warnings.push(`Publisher mismatch: ${base.source} says '${base.publisher}', ${sec.source} says '${sec.publisher}'. Using '${base.publisher}'.`);
+    }
+    if (!base.year) base.year = sec.year;
+    if (!base.publisher) base.publisher = sec.publisher;
+    if (!base.isbn) base.isbn = sec.isbn;
+    if (!base.authors_raw || !base.authors_raw.length) {
+      base.authors_raw = sec.authors_raw;
+      base.role = sec.role || 'author';
+    }
+    if (sec.source === 'Crossref' && sec.role === 'editor' && sec.authors_raw && sec.authors_raw.length) {
+      base.role = 'editor';
+    }
+  }
+
+  if (sourcesUsed.length === 1) {
+    warnings.push(`Only ${sourcesUsed[0]} returned a result; nothing to cross-check it against.`);
+  }
+
+  return [base, warnings];
+}
+
+function download(filename, text) {
+  const blob = new Blob([text], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+$('go').addEventListener('click', async () => {
+  const title = $('title').value.trim();
+  if (!title) { $('title').focus(); return; }
+  const author = $('author').value.trim();
+  const yearOverride = $('year').value.trim();
+  const publisherOverride = $('publisher').value.trim();
+  const isbnOverride = $('isbn').value.trim();
+  const apiKey = $('apikey').value.trim();
+  if (apiKey) localStorage.setItem('gbooks_api_key', apiKey);
+
+  const btn = $('go');
+  const log = $('log');
+  const warnbox = $('warnbox');
+  const resultPanel = $('resultPanel');
+  log.style.display = 'block';
+  log.textContent = '';
+  warnbox.style.display = 'none';
+  resultPanel.style.display = 'none';
+  btn.disabled = true;
+  btn.textContent = 'Searching...';
+
+  const append = (line) => { log.textContent += line + '\n'; log.scrollTop = log.scrollHeight; };
+
+  try {
+    append(`Searching Google Books for "${title}"${author ? ' by ' + author : ''}...`);
+    const gb = await fetchGoogleBooks(title, author, apiKey, append);
+    append(gb ? `  Google Books: found "${gb.title}" (${gb.year || '?'}, ${gb.publisher || '?'})` : '  Google Books: no usable match');
+
+    append('Cross-checking Open Library...');
+    const ol = await fetchOpenLibrary(title, author, append);
+    append(ol ? `  Open Library: found "${ol.title}" (${ol.year || '?'}, ${ol.publisher || '?'})` : '  Open Library: no usable match');
+
+    append('Cross-checking Crossref...');
+    const cf = await fetchCrossref(title, author, append);
+    append(cf ? `  Crossref: found "${cf.title}" (${cf.role}: ${cf.authors_raw.join(', ') || '?'}, ${cf.year || '?'})` : '  Crossref: no usable match');
+
+    const [merged, warnings] = mergeSources(gb, [ol, cf], append);
+
+    const finalTitle = merged.title || title;
+    const finalYear = yearOverride || merged.year || '';
+    const finalPublisher = publisherOverride || merged.publisher || '';
+    const finalIsbn = isbnOverride || merged.isbn || '';
+    const finalUrl = merged.url || '';
+    const finalRole = merged.role || 'author';
+
+    let authorString = author;
+    if (!authorString && merged.authors_raw && merged.authors_raw.length) {
+      authorString = merged.authors_raw.join(', ');
+    }
+    const authors = authorString ? parseAuthors(authorString) : [{ first: '', last: '' }];
+
+    if (warnings.length) {
+      warnbox.style.display = 'block';
+      warnbox.innerHTML = warnings.map((w) => `&#9888; ${w}`).join('<br>');
+    }
+    if (!finalYear || !finalPublisher || !authorString) {
+      warnbox.style.display = 'block';
+      warnbox.innerHTML += (warnings.length ? '<br>' : '') + '&#9888; Some fields could not be verified automatically. Use the manual overrides above and search again.';
+    }
+
+    const apaText = formatAPA(finalTitle, authors, finalYear, finalPublisher, finalRole);
+    const risText = formatRIS(finalTitle, authors, finalYear, finalPublisher, finalIsbn, finalUrl, finalRole);
+    const slug = slugify(finalTitle);
+
+    $('apaFilename').textContent = `${slug}_apa.txt`;
+    $('risFilename').textContent = `${slug}.ris`;
+    $('apaOut').textContent = apaText;
+    $('risOut').textContent = risText;
+    resultPanel.style.display = 'block';
+
+    $('dlApa').onclick = () => download(`${slug}_apa.txt`, apaText + '\n');
+    $('dlRis').onclick = () => download(`${slug}.ris`, risText + '\n');
+
+    append('Done.');
+  } catch (e) {
+    append(`  [error] ${e.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Look up & generate';
+  }
+});
+
+window.addEventListener('DOMContentLoaded', () => {
+  const saved = localStorage.getItem('gbooks_api_key');
+  if (saved) $('apikey').value = saved;
+});
+</script>
+</body>
+</html>
