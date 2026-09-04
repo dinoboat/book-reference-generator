@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Book Reference Generator</title>
+<title>Reference Generator</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -166,36 +166,38 @@
 </head>
 <body>
 <main>
-  <h1>Book Reference Generator</h1>
-  <p class="subtitle">Give it a title, it searches Google Books, Open Library, and Crossref, cross-checks them, and generates an APA reference plus an RIS bibliography entry.</p>
+  <h1>Reference Generator</h1>
+  <p class="subtitle">Generates an APA reference and an RIS bibliography entry for books.</p>
 
   <div class="panel">
-    <label for="title">Book title, ISBN, or Amazon book link *</label>
-    <input type="text" id="title" placeholder="e.g. Software Studies: A Lexicon, or an ISBN, or an amazon.com/dp/... link">
-    <p class="hint">Amazon links: the ISBN is read out of the URL itself, no request is ever sent to Amazon. Goodreads links aren't supported (no public API) &mdash; copy the ISBN from the page and paste that instead.</p>
+    <div id="bookFields">
+      <label for="title">Book title, ISBN, Amazon link, or Douban (豆瓣) link *</label>
+      <input type="text" id="title" placeholder="e.g. Software Studies: A Lexicon, an ISBN, an amazon.com/dp/... link, or a book.douban.com/subject/... link">
+      <p class="hint">Amazon links: the ISBN is read out of the URL itself, no request is ever sent to Amazon. Goodreads links aren't supported (no public API) &mdash; copy the ISBN from the page and paste that instead. Douban (豆瓣) links: since Douban has no public API and blocks direct browser requests, the page is fetched through <a href="https://r.jina.ai" target="_blank" rel="noopener">r.jina.ai</a>, a public read-only page-reader proxy &mdash; only the URL you paste is sent to it.</p>
 
-    <label for="author">Author (optional, helps disambiguate a title search)</label>
-    <input type="text" id="author" placeholder="e.g. Matthew Fuller">
+      <label for="author">Author (optional, helps disambiguate a title search)</label>
+      <input type="text" id="author" placeholder="e.g. Matthew Fuller">
 
-    <details>
-      <summary>Manual overrides &amp; options</summary>
-      <div class="row2">
-        <div>
-          <label for="year">Year override</label>
-          <input type="text" id="year" placeholder="e.g. 2008">
+      <details>
+        <summary>Manual overrides &amp; options</summary>
+        <div class="row2">
+          <div>
+            <label for="year">Year override</label>
+            <input type="text" id="year" placeholder="e.g. 2008">
+          </div>
+          <div>
+            <label for="isbn">ISBN override</label>
+            <input type="text" id="isbn" placeholder="e.g. 9780262062749">
+          </div>
         </div>
-        <div>
-          <label for="isbn">ISBN override</label>
-          <input type="text" id="isbn" placeholder="e.g. 9780262062749">
-        </div>
-      </div>
-      <label for="publisher">Publisher override</label>
-      <input type="text" id="publisher" placeholder="e.g. MIT Press">
+        <label for="publisher">Publisher override</label>
+        <input type="text" id="publisher" placeholder="e.g. MIT Press">
 
-      <label for="apikey">Google Books API key (optional)</label>
-      <input type="text" id="apikey" placeholder="avoids shared rate limits, saved in this browser only">
-      <p class="hint">Free key: console.cloud.google.com &rarr; enable "Books API" &rarr; Credentials &rarr; Create API key. Stored only in your browser's local storage, never sent anywhere but Google.</p>
-    </details>
+        <label for="apikey">Google Books API key (optional)</label>
+        <input type="text" id="apikey" placeholder="avoids shared rate limits, saved in this browser only">
+        <p class="hint">Free key: console.cloud.google.com &rarr; enable "Books API" &rarr; Credentials &rarr; Create API key. Stored only in your browser's local storage, never sent anywhere but Google.</p>
+      </details>
+    </div>
 
     <button id="go">Look up &amp; generate</button>
     <div id="log"></div>
@@ -212,14 +214,16 @@
     <button class="dl-btn" id="dlRis">Download .ris</button>
   </div>
 
-  <footer>Runs entirely in your browser. No data is sent anywhere except Google Books, Open Library, and Crossref's public APIs.</footer>
+  <footer>Runs entirely in your browser. Book lookups query Google Books, Open Library, and Crossref's public APIs.</footer>
 </main>
 
 <script>
 const $ = (id) => document.getElementById(id);
 
 function slugify(text) {
-  return text.replace(/[^\w\s-]/g, '').trim().toLowerCase().replace(/[\s_-]+/g, '-') || 'reference';
+  // \w doesn't match CJK ideographs, so keep U+3400-U+9FFF explicitly or a
+  // Chinese title would get stripped down to nothing and fall back to "reference".
+  return text.replace(/[^\w\s㐀-鿿-]/g, '').trim().toLowerCase().replace(/[\s_-]+/g, '-') || 'reference';
 }
 
 function parseAuthors(authorString) {
@@ -230,6 +234,10 @@ function parseAuthors(authorString) {
     return { first: words.slice(0, -1).join(' '), last: words[words.length - 1] };
   });
   return authors.length ? authors : [{ first: '', last: authorString.trim() }];
+}
+
+function isCJK(str) {
+  return /[㐀-鿿]/.test(str || '');
 }
 
 function initials(first) {
@@ -243,35 +251,49 @@ function formatName(a) {
   return s;
 }
 
-function formatAPA(title, authors, year, publisher, role) {
-  const authorParts = authors.map((a) => {
+// Real (non-placeholder) entries only — filters out the {first:'',last:''}
+// placeholder used when no author data exists at all.
+function realAuthors(authors) {
+  return authors.filter((a) => a.last || a.first);
+}
+
+// Builds "Last, F. M., & Last2, F. M." — returns '' (not a placeholder) when
+// there's no real author data, so callers can decide their own fallback text.
+function formatAuthorListAPA(authors) {
+  const authorParts = realAuthors(authors).map((a) => {
     let s = `${a.last}, ${initials(a.first)}`.trim();
     if (s.endsWith(',')) s = s.slice(0, -1);
     return s;
-  });
-  let authorStr;
-  if (authorParts.length === 1) authorStr = authorParts[0];
-  else if (authorParts.length === 2) authorStr = `${authorParts[0]}, & ${authorParts[1]}`;
-  else if (authorParts.length > 1) authorStr = authorParts.slice(0, -1).join(', ') + `, & ${authorParts[authorParts.length - 1]}`;
-  else authorStr = '[Author unknown]';
+  }).filter(Boolean);
 
-  if (authorParts.length && role === 'editor') {
-    authorStr += authorParts.length === 1 ? ' (Ed.).' : ' (Eds.).';
+  if (!authorParts.length) return '';
+  if (authorParts.length === 1) return authorParts[0];
+  if (authorParts.length === 2) return `${authorParts[0]}, & ${authorParts[1]}`;
+  return authorParts.slice(0, -1).join(', ') + `, & ${authorParts[authorParts.length - 1]}`;
+}
+
+function formatAPA(title, authors, year, publisher, role, translators) {
+  const authorList = formatAuthorListAPA(authors);
+  let authorStr = authorList || '[Author unknown]';
+  if (authorList && role === 'editor') {
+    authorStr += realAuthors(authors).length === 1 ? ' (Ed.).' : ' (Eds.).';
   }
 
   const yearStr = year || 'n.d.';
   const publisherStr = publisher || '[Publisher unknown]';
-  return `${authorStr} (${yearStr}). ${title}. ${publisherStr}.`;
+  const titlePart = (translators && translators.length) ? `${title} (${translators.join('、')} 译)` : title;
+  return `${authorStr} (${yearStr}). ${titlePart}. ${publisherStr}.`;
 }
 
-function formatRIS(title, authors, year, publisher, isbn, url, role) {
+function formatRIS(title, authors, year, publisher, isbn, url, role, translators) {
   const lines = ['TY  - BOOK'];
   const tag = role === 'editor' ? 'ED' : 'AU';
-  authors.forEach((a) => lines.push(`${tag}  - ${formatName(a)}`));
+  realAuthors(authors).forEach((a) => lines.push(`${tag}  - ${formatName(a)}`));
   lines.push(`TI  - ${title}`);
   if (year) lines.push(`PY  - ${year}`);
   if (publisher) lines.push(`PB  - ${publisher}`);
   if (isbn) lines.push(`SN  - ${isbn}`);
+  if (translators && translators.length) translators.forEach((t) => lines.push(`A2  - ${t}`));
   if (url) lines.push(`UR  - ${url}`);
   lines.push('ER  - ');
   return lines.join('\n');
@@ -318,7 +340,89 @@ function parseIdentifier(raw) {
     return { type: 'goodreads-unsupported' };
   }
 
+  const doubanMatch = trimmed.match(/douban\.com\/subject\/(\d+)/i);
+  if (doubanMatch) {
+    return { type: 'douban', value: `https://book.douban.com/subject/${doubanMatch[1]}/` };
+  }
+
   return { type: 'title', value: trimmed };
+}
+
+// --- Douban (豆瓣): Douban has no public API and blocks direct cross-origin
+// fetches, so the page is fetched through r.jina.ai (a public read-only page
+// reader that returns plain text/markdown with permissive CORS), then the
+// "标签: 值" info lines are pulled out with regex. ---
+
+async function fetchTextViaReader(url, log) {
+  try {
+    // X-Target-Selector asks the reader to extract just the #info block
+    // instead of the whole page — smaller, faster, and (unlike relying on
+    // its general readability heuristics) reliably includes the metadata
+    // fields regardless of how a given book page happens to be laid out.
+    const resp = await fetch(`https://r.jina.ai/${url}`, {
+      headers: { 'X-Target-Selector': '#info' },
+    });
+    if (!resp.ok) {
+      log(`  [warning] r.jina.ai responded ${resp.status} ${resp.statusText}`);
+      return null;
+    }
+    return await resp.text();
+  } catch (e) {
+    log(`  [warning] request to r.jina.ai failed: ${e.message}`);
+    return null;
+  }
+}
+
+function extractDoubanField(text, label) {
+  const re = new RegExp(`${label}\\s*[:：]\\s*(.+)`);
+  const m = text.match(re);
+  if (!m) return null;
+  const raw = m[1].trim();
+  // Markdown links here can be "[[美] Name](url)" — nested brackets in the
+  // link text — so split on "](" (the link text/URL boundary) rather than
+  // a bare "]", which would otherwise cut the match off at the inner "]".
+  const linked = [...raw.matchAll(/\[(.+?)\]\(/g)].map((x) => x[1]);
+  if (linked.length) return linked;
+  return raw.split('/').map((s) => s.trim()).filter(Boolean);
+}
+
+function parseDoubanPage(text, url) {
+  const titleMatch = text.match(/^Title:\s*(.+)$/m);
+  let title = titleMatch ? titleMatch[1].trim().replace(/\s*\(豆瓣\)\s*$/, '') : null;
+  const subtitle = extractDoubanField(text, '副标题');
+  if (title && subtitle && subtitle[0]) title += `：${subtitle[0]}`;
+
+  const authorsRaw = extractDoubanField(text, '作者') || [];
+  const translatorsRaw = extractDoubanField(text, '译者') || [];
+  const publisher = (extractDoubanField(text, '出版社') || extractDoubanField(text, '出品方') || [])[0] || null;
+  const yearField = extractDoubanField(text, '出版年');
+  const isbnField = extractDoubanField(text, 'ISBN');
+
+  let year = null;
+  if (yearField && yearField[0]) {
+    const m = /(\d{4})/.exec(yearField[0]);
+    if (m) year = parseInt(m[1], 10);
+  }
+
+  if (!title && !authorsRaw.length && !publisher && !year) return null;
+
+  return {
+    source: 'Douban',
+    title: title || '[Title unknown]',
+    authors_raw: authorsRaw,
+    translators_raw: translatorsRaw,
+    role: 'author',
+    year,
+    publisher,
+    isbn: isbnField && isbnField[0] ? isbnField[0].replace(/[^\dXx]/g, '') : null,
+    url,
+  };
+}
+
+async function fetchDouban(url, log) {
+  const text = await fetchTextViaReader(url, log);
+  if (!text) return null;
+  return parseDoubanPage(text, url);
 }
 
 function extractGoogleBooksInfo(info, fallbackTitle) {
@@ -474,12 +578,12 @@ function titlesLikelyMatch(a, b) {
   return na === nb || na.includes(nb) || nb.includes(na);
 }
 
-function mergeSources(primary, secondaries, log) {
+function mergeSources(primary, secondaries, log, notFoundMessage) {
   secondaries = secondaries.filter(Boolean);
   const warnings = [];
 
   if (!primary && !secondaries.length) {
-    return [{}, ['No results found on Google Books, Open Library, or Crossref. Use the manual overrides above.']];
+    return [{}, [notFoundMessage || 'No results found on Google Books, Open Library, or Crossref. Use the manual overrides above.']];
   }
   if (!primary) primary = secondaries.shift();
 
@@ -529,7 +633,20 @@ function download(filename, text) {
   URL.revokeObjectURL(url);
 }
 
+function showResult(slug, apaText, risText) {
+  $('apaFilename').textContent = `${slug}_apa.txt`;
+  $('risFilename').textContent = `${slug}.ris`;
+  $('apaOut').textContent = apaText;
+  $('risOut').textContent = risText;
+  $('resultPanel').style.display = 'block';
+  $('dlApa').onclick = () => download(`${slug}_apa.txt`, apaText + '\n');
+  $('dlRis').onclick = () => download(`${slug}.ris`, risText + '\n');
+}
+
 $('go').addEventListener('click', async () => {
+  $('warnbox').style.display = 'none';
+  $('resultPanel').style.display = 'none';
+
   const rawInput = $('title').value.trim();
   if (!rawInput) { $('title').focus(); return; }
   const author = $('author').value.trim();
@@ -571,11 +688,27 @@ $('go').addEventListener('click', async () => {
   }
 
   const usingIsbn = identifier.type === 'isbn';
+  const usingDouban = identifier.type === 'douban';
   const title = identifier.value;
 
   try {
-    let gb, ol, cf;
-    if (usingIsbn) {
+    let gb, ol, cf, primary, notFoundMessage;
+    if (usingDouban) {
+      append(`Fetching Douban page via r.jina.ai reader proxy (Douban has no public API and blocks direct browser requests)...`);
+      primary = await fetchDouban(identifier.value, append);
+      append(primary ? `  Douban: found "${primary.title}" (${primary.year || '?'}, ${primary.publisher || '?'})` : '  Douban: failed to fetch or parse the page');
+      notFoundMessage = 'Could not fetch or parse the Douban page — the reader proxy (r.jina.ai) may be temporarily unavailable, or the page structure has changed. Try again in a moment, or fill in the manual overrides above.';
+
+      if (primary && primary.isbn) {
+        append(`Cross-checking Google Books, Open Library, and Crossref by ISBN ${primary.isbn}...`);
+        gb = await fetchGoogleBooksByISBN(primary.isbn, apiKey, append);
+        append(gb ? `  Google Books: found "${gb.title}" (${gb.year || '?'}, ${gb.publisher || '?'})` : '  Google Books: no usable match');
+        ol = await fetchOpenLibraryByISBN(primary.isbn, append);
+        append(ol ? `  Open Library: found "${ol.title}" (${ol.year || '?'}, ${ol.publisher || '?'})` : '  Open Library: no usable match');
+        cf = await fetchCrossrefByISBN(primary.isbn, append);
+        append(cf ? `  Crossref: found "${cf.title}" (${cf.role}: ${cf.authors_raw.join(', ') || '?'}, ${cf.year || '?'})` : '  Crossref: no usable match');
+      }
+    } else if (usingIsbn) {
       const isbn = identifier.value;
       append(identifier.via ? `Extracted ISBN ${isbn} from ${identifier.via}...` : `Searching by ISBN ${isbn}...`);
       gb = await fetchGoogleBooksByISBN(isbn, apiKey, append);
@@ -602,20 +735,28 @@ $('go').addEventListener('click', async () => {
       append(cf ? `  Crossref: found "${cf.title}" (${cf.role}: ${cf.authors_raw.join(', ') || '?'}, ${cf.year || '?'})` : '  Crossref: no usable match');
     }
 
-    const [merged, warnings] = mergeSources(gb, [ol, cf], append);
+    const [merged, warnings] = usingDouban
+      ? mergeSources(primary, [gb, ol, cf], append, notFoundMessage)
+      : mergeSources(gb, [ol, cf], append);
 
     const finalTitle = merged.title || (usingIsbn ? `ISBN ${identifier.value}` : title);
     const finalYear = yearOverride || merged.year || '';
     const finalPublisher = publisherOverride || merged.publisher || '';
     const finalIsbn = isbnOverride || merged.isbn || (usingIsbn ? identifier.value : '');
-    const finalUrl = merged.url || '';
+    const finalUrl = merged.url || (usingDouban ? identifier.value : '');
     const finalRole = merged.role || 'author';
+    const translators = merged.translators_raw || [];
 
     let authorString = author;
     if (!authorString && merged.authors_raw && merged.authors_raw.length) {
       authorString = merged.authors_raw.join(', ');
     }
-    const authors = authorString ? parseAuthors(authorString) : [{ first: '', last: '' }];
+    // CJK names have no spaces to split into first/last, and shouldn't be
+    // inverted or given initials under APA's rules for non-Latin-script names
+    // — keep each one as a single atomic "last" token instead of parsing it.
+    const authors = (!author && merged.authors_raw && merged.authors_raw.length && merged.authors_raw.some(isCJK))
+      ? merged.authors_raw.map((name) => ({ first: '', last: name }))
+      : (authorString ? parseAuthors(authorString) : [{ first: '', last: '' }]);
 
     if (warnings.length) {
       warnbox.style.display = 'block';
@@ -626,18 +767,9 @@ $('go').addEventListener('click', async () => {
       warnbox.innerHTML += (warnings.length ? '<br>' : '') + '&#9888; Some fields could not be verified automatically. Use the manual overrides above and search again.';
     }
 
-    const apaText = formatAPA(finalTitle, authors, finalYear, finalPublisher, finalRole);
-    const risText = formatRIS(finalTitle, authors, finalYear, finalPublisher, finalIsbn, finalUrl, finalRole);
-    const slug = slugify(finalTitle);
-
-    $('apaFilename').textContent = `${slug}_apa.txt`;
-    $('risFilename').textContent = `${slug}.ris`;
-    $('apaOut').textContent = apaText;
-    $('risOut').textContent = risText;
-    resultPanel.style.display = 'block';
-
-    $('dlApa').onclick = () => download(`${slug}_apa.txt`, apaText + '\n');
-    $('dlRis').onclick = () => download(`${slug}.ris`, risText + '\n');
+    const apaText = formatAPA(finalTitle, authors, finalYear, finalPublisher, finalRole, translators);
+    const risText = formatRIS(finalTitle, authors, finalYear, finalPublisher, finalIsbn, finalUrl, finalRole, translators);
+    showResult(slugify(finalTitle), apaText, risText);
 
     append('Done.');
   } catch (e) {
